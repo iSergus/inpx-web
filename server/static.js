@@ -1,6 +1,8 @@
 const fs = require('fs-extra');
 const path = require('path');
-const yazl = require('yazl');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 const express = require('express');
 const utils = require('./core/utils');
@@ -8,19 +10,36 @@ const webAppDir = require('../build/appdir');
 
 const log = new (require('./core/AppLogger'))().log;//singleton
 
-function generateZip(zipFile, dataFile, dataFileInZip) {
-    return new Promise((resolve, reject) => {
-        const zip = new yazl.ZipFile();
-        zip.addFile(dataFile, dataFileInZip);
-        zip.outputStream
-            .pipe(fs.createWriteStream(zipFile)).on('error', reject)
-            .on('finish', (err) => {
-                if (err) reject(err);
-                else resolve();
-            }
-        );
-        zip.end();
-    });
+// Функция создания zip архива с помощью 7zip
+async function generateZip(zipFile, dataFile, dataFileInZip) {
+    const tempDir = path.dirname(zipFile);
+    const tempExtractDir = path.join(tempDir, '_temp_extract_' + Date.now());
+    
+    try {
+        await fs.ensureDir(tempExtractDir);
+        
+        // Копируем файл во временную директорию с нужным именем
+        const tempDataFile = path.join(tempExtractDir, dataFileInZip);
+        await fs.copy(dataFile, tempDataFile);
+        
+        // Путь к 7zip (можно вынести в config)
+        const sevenZipPath = config.sevenZipPath || '7z';
+        
+        // Создаем архив: 7z a -tzip archive.zip файл
+        const command = `"${sevenZipPath}" a -tzip "${zipFile}" "${tempDataFile}"`;
+        
+        const { stdout, stderr } = await execPromise(command);
+        
+        if (stderr && !stderr.toLowerCase().includes('everything is ok')) {
+            console.warn('7zip warnings:', stderr);
+        }
+        
+    } catch (error) {
+        throw new Error(`Failed to create zip with 7zip: ${error.message}`);
+    } finally {
+        // Очищаем временную директорию
+        await fs.remove(tempExtractDir);
+    }
 }
 
 module.exports = (app, config) => {
@@ -62,7 +81,7 @@ module.exports = (app, config) => {
                         if (fileType === undefined || fileType === 'raw') {
                             bookFile = rawFile;
                         } else if (fileType === 'zip') {
-                            //создаем zip-файл
+                            //создаем zip-файл с помощью 7zip
                             bookFile += '.zip';
                             if (!await fs.pathExists(bookFile))
                                 await generateZip(bookFile, rawFile, downFileName);
